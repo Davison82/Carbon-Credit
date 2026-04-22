@@ -50,3 +50,6 @@ for project, vintage, address in contracts:
 df = pd.DataFrame(results)
 print("\n--- RESULTS ---")
 print(df.to_string(index=False))
+
+df.to_csv("carbon_audit_results.csv", index=False)
+print("Saved to carbon_audit_results.csv")
