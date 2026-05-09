@@ -1,16 +1,27 @@
 import requests
 import pandas as pd
 import time
-import os
 
 API_KEY = "TKG4JAC829ZXXJ5E2NSFA2WH4YGF9KCMR5"
 
+# (Project, Vintage, Contract Address, Verra Issued)
 contracts = [
-    ("VCS-191", "2008", "0xb139c4cc9d20a3618e9a2268d73eff18c496b991"),
-    ("VCS-191", "2009", "0xccacc6099debd9654c6814fcb800431ef7549b10"),
-    ("VCS-191", "2010", "0xc645b80fd8a23a1459d59626ba3f872e8a59d4cb"),
-    ("VCS-1577", "2012", "0x68e65cc375f10baf74ac41773658dd00b5de1eaa"),
-    ("VCS-1525", "2011", "0xCFCAd380a9f21ad3e73cb0c8898a25fcb87679fe"),
+    # VCS-191 Dayingjiang Hydropower China
+    ("VCS-191", "2008", "0xb139c4cc9d20a3618e9a2268d73eff18c496b991", 609708),
+    ("VCS-191", "2009", "0xccacc6099debd9654c6814fcb800431ef7549b10", 745096),
+    ("VCS-191", "2010", "0xc645b80fd8a23a1459d59626ba3f872e8a59d4cb", 817655),
+    ("VCS-191", "2011", "0x4f2b7157672d2522b0f8aba17b5e87bc53436e69", 868628),
+
+    # VCS-1577 Forestry China
+    ("VCS-1577", "2012", "0x68e65cc375f10baf74ac41773658dd00b5de1eaa", 52222),
+    ("VCS-1577", "2013", "0x38C51840B7378Aaaf", 52519),
+    ("VCS-1577", "2014", "0x80ea96D7F5477ee8A", 52814),
+    ("VCS-1577", "2015", "0x04943C1984ee78292", 53111),
+    ("VCS-1577", "2016", "0x8d6E4e58DffC7387B", 55041),
+
+    # VCS-1525 Wind India
+    ("VCS-1525", "2011", "0xCFCAd380a9f21ad3e73cb0c8898a25fcb87679fe", 46318),
+    ("VCS-1525", "2012", "0x7526b59e9f427F1fb", 64029),
 ]
 
 def get_total_supply(contract_address):
@@ -25,31 +36,39 @@ def get_total_supply(contract_address):
     try:
         response = requests.get(url, params=params)
         data = response.json()
-        print(f"Raw response: {data}")
         if data["status"] == "1":
             raw = int(data["result"])
             tonnes = raw / 10**18
             return round(tonnes, 2)
         else:
+            print(f"API error for {contract_address}: {data.get('message', 'Unknown error')}")
             return None
     except Exception as e:
         print(f"Error: {e}")
         return None
 
 results = []
-for project, vintage, address in contracts:
+for project, vintage, address, verra_issued in contracts:
     print(f"Querying {project} {vintage}...")
     supply = get_total_supply(address)
+    if supply is not None:
+        retired = round(verra_issued - supply, 2)
+        retirement_rate = round((retired / verra_issued) * 100, 1)
+    else:
+        retired = None
+        retirement_rate = None
     results.append({
         "Project": project,
         "Vintage": vintage,
-        "Active Supply (tonnes)": supply
+        "Verra Issued": verra_issued,
+        "Active Supply (tonnes)": supply,
+        "Retired (tonnes)": retired,
+        "Retirement Rate %": retirement_rate
     })
     time.sleep(0.2)
 
 df = pd.DataFrame(results)
-print("\n--- RESULTS ---")
+print("\n--- RECONCILIATION RESULTS ---")
 print(df.to_string(index=False))
-
-df.to_csv("carbon_audit_results.csv", index=False)
-print("Saved to carbon_audit_results.csv")
+df.to_csv("TCO2_active_supply_20250509_v1.csv", index=False)
+print("\nSaved to TCO2_active_supply_20250509_v1.csv")
