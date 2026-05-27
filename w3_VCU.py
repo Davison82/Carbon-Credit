@@ -72,7 +72,7 @@ for project, vintage, address, verra_issued in contracts:
         "Retired (tonnes)": retired,
         "Retirement Rate %": retirement_rate
     })
-    time.sleep(0.2)
+    time.sleep(0.5)
 
 df = pd.DataFrame(results)
 print("\n--- RECONCILIATION RESULTS ---")
