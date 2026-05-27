@@ -67,7 +67,7 @@ for project, vintage, address, verra_issued, project_type, country, methodology,
     results.append({
         "Project": project,
         "Vintage": vintage,
-        "Project Type": project type,
+        "Project Type": project_type,
         "Methodology": methodology,
         "Verra Status": verra_status,
         "Verra Issued": verra_issued,
