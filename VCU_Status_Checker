@@ -2,7 +2,7 @@ import pandas as pd
 import sys
 
 # --- CONFIG ---
-BERKELEY_XLSX = r"C:\Users\jdavis01\OneDrive - PRGX Global, Inc\Documents\DEFI\Verra\Verra Database 2026 04.xlsx"
+BERKELEY_XLSX = "Verra Database 2026 04.xlsx"
 SHEET_NAME = "PROJECTS"
 STATUS_COL = "Voluntary Status"
 
