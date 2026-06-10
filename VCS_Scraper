@@ -1,0 +1,150 @@
+import pandas as pd
+import requests
+import time
+from bs4 import BeautifulSoup
+
+# --- CONFIG ---
+ON_HOLD_CSV = "on_hold_audit_queue.csv"
+BASE_URL = "https://polygonscan.com/tokens"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
+# --- LOAD ON HOLD PROJECTS ---
+def load_on_hold(filepath):
+    df = pd.read_csv(filepath)
+    print(f"Loaded {len(df)} On Hold projects\n")
+    return df
+
+# --- SCRAPE POLYGONSCAN FOR TOKENS ---
+def check_polygon_tokens(project_id):
+    """
+    Scrapes polygonscan.com/tokens?q=TCO2-VCS-[ID]
+    Returns list of token contracts found
+    """
+    url = f"{BASE_URL}?q=TCO2-VCS-{project_id}"
+    tokens_found = []
+
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        if response.status_code != 200:
+            return None, f"HTTP {response.status_code}"
+
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # PolygonScan token results appear in a table
+        rows = soup.select("table tbody tr")
+
+        for row in rows:
+            cells = row.find_all("td")
+            if not cells:
+                continue
+
+            token_text = row.get_text()
+
+            # Only include genuine TCO2 tokens — exclude TS2OMock
+            if f"TCO2-VCS-{project_id}" in token_text and "TS2O" not in token_text:
+                # Try to get contract address from link
+                link = row.find("a", href=True)
+                contract = link["href"].replace("/token/", "").split("?")[0] if link else "unknown"
+                
+                # Try to get token name
+                name_cell = cells[1].get_text(strip=True) if len(cells) > 1 else "N/A"
+                
+                tokens_found.append({
+                    "contract": contract,
+                    "name": name_cell
+                })
+
+        return tokens_found, None
+
+    except Exception as e:
+        return None, str(e)
+
+# --- MAIN SCREENER ---
+def screen_on_hold_projects(df):
+    id_col = next((c for c in df.columns if "project id" in c.lower()), None)
+    name_col = next((c for c in df.columns if "project name" in c.lower()), None)
+
+    if not id_col:
+        print("ERROR: Could not find Project ID column")
+        print("Available columns:", list(df.columns))
+        return
+
+    results = []
+    findings = []
+
+    print(f"Screening {len(df)} On Hold projects against Polygon...\n")
+    print(f"{'Project ID':<12} {'Name':<35} {'Tokens':<8} {'Result'}")
+    print("-" * 80)
+
+    for _, row in df.iterrows():
+        raw_id = str(row[id_col]).strip()
+        numeric_id = raw_id.replace("VCS-", "").strip()
+        name = str(row[name_col])[:33] if name_col else "N/A"
+
+        tokens, error = check_polygon_tokens(numeric_id)
+
+        if error:
+            status = f"ERROR: {error[:30]}"
+            print(f"{raw_id:<12} {name:<35} {'—':<8} {status}")
+            results.append({
+                "project_id": raw_id,
+                "name": name,
+                "tokens_found": 0,
+                "contracts": "",
+                "status": "error"
+            })
+
+        elif len(tokens) == 0:
+            print(f"{raw_id:<12} {name:<35} {'0':<8} No tokens on Polygon")
+            results.append({
+                "project_id": raw_id,
+                "name": name,
+                "tokens_found": 0,
+                "contracts": "",
+                "status": "no tokens"
+            })
+
+        else:
+            contracts = " | ".join([t["contract"] for t in tokens])
+            flag = " *** FINDING ***"
+            print(f"{raw_id:<12} {name:<35} {len(tokens):<8} ACTIVE TOKENS{flag}")
+            results.append({
+                "project_id": raw_id,
+                "name": name,
+                "tokens_found": len(tokens),
+                "contracts": contracts,
+                "status": "ACTIVE"
+            })
+            findings.append({
+                "project_id": raw_id,
+                "name": name,
+                "tokens": tokens
+            })
+
+        # Polite delay to avoid getting blocked
+        time.sleep(2)
+
+    # --- EXPORT FULL RESULTS ---
+    results_df = pd.DataFrame(results)
+    results_df.to_csv("polygon_screen_results.csv", index=False)
+    print(f"\nFull results exported to polygon_screen_results.csv")
+
+    # --- SUMMARY ---
+    print(f"\n{'='*80}")
+    print(f"SCREENING COMPLETE — {len(findings)} On Hold projects with active tokens found")
+    print(f"{'='*80}\n")
+
+    if findings:
+        for f in findings:
+            print(f"  {f['project_id']} — {f['name']}")
+            for t in f["tokens"]:
+                print(f"    Contract: {t['contract']}")
+                print(f"    Token:    {t['name']}")
+    else:
+        print("  No active tokens found on any On Hold projects")
+
+if __name__ == "__main__":
+    df = load_on_hold(ON_HOLD_CSV)
+    screen_on_hold_projects(df)
