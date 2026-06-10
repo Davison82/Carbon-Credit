@@ -2,97 +2,84 @@ import pandas as pd
 import sys
 
 # --- CONFIG ---
-BERKELEY_CSV = r"C:\Users\jdavis01\OneDrive - PRGX Global, Inc\Documents\DEFI\Verra\Voluntary-Registry-Offsets-Database--v2025-10(1).csv"  # update to your actual filename
+BERKELEY_XLSX = r"C:\Users\jdavis01\OneDrive - PRGX Global, Inc\Documents\DEFI\Verra\Verra Database 2026 04.xlsx"
+SHEET_NAME = "PROJECTS"
+STATUS_COL = "Voluntary Status"
 
-# Project IDs to check
 PROJECT_IDS = [
     "981",
     "191",
     "1577",
     "1525",
-    # add more here
 ]
 
 # --- LOAD DATABASE ---
 def load_berkeley(filepath):
     try:
-        df = pd.read_csv(filepath)
-        print(f"Loaded {len(df)} projects from Berkeley database\n")
+        df = pd.read_excel(filepath, sheet_name=SHEET_NAME)
+        print(f"Loaded {len(df)} projects from Verra database\n")
         return df
     except FileNotFoundError:
         print(f"ERROR: Could not find {filepath}")
         sys.exit(1)
+    except Exception as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
 # --- STATUS CHECKER ---
 def check_status(df, project_ids):
-    results = []
-
-    # Try to find the right column names — adjust if yours differ
-    id_col = next((c for c in df.columns if "id" in c.lower() or "project" in c.lower()), None)
-    status_col = next((c for c in df.columns if "status" in c.lower()), None)
+    # Find the ID column
+    id_col = next((c for c in df.columns if "id" in c.lower()), None)
     name_col = next((c for c in df.columns if "name" in c.lower()), None)
 
-    if not id_col or not status_col:
-        print("ERROR: Could not find ID or Status column")
+    if not id_col:
+        print("ERROR: Could not find ID column")
         print("Available columns:", list(df.columns))
         sys.exit(1)
 
-    print(f"Using columns: ID='{id_col}' | Status='{status_col}' | Name='{name_col}'\n")
-    print(f"{'Project ID':<15} {'Name':<40} {'Status':<20}")
-    print("-" * 75)
+    print(f"Using columns: ID='{id_col}' | Status='{STATUS_COL}' | Name='{name_col}'\n")
+    print(f"{'Project ID':<15} {'Name':<40} {'Status':<30}")
+    print("-" * 85)
 
     for pid in project_ids:
-        # Match on project ID — handles VCS-981 or just 981
         mask = df[id_col].astype(str).str.contains(str(pid), case=False, na=False)
         match = df[mask]
 
         if match.empty:
-            print(f"VCS-{pid:<11} {'NOT FOUND IN DATABASE':<40} {'—':<20}")
-            results.append({"project_id": pid, "name": "NOT FOUND", "status": "NOT FOUND"})
+            print(f"VCS-{pid:<11} {'NOT FOUND':<40} {'—':<30}")
         else:
             for _, row in match.iterrows():
                 name = row[name_col] if name_col else "N/A"
-                status = row[status_col]
-                flag = " *** ON HOLD ***" if "hold" in str(status).lower() or "review" in str(status).lower() else ""
-                print(f"VCS-{pid:<11} {str(name):<40} {str(status):<20}{flag}")
-                results.append({"project_id": pid, "name": name, "status": status})
-
-    return results
+                status = row[STATUS_COL]
+                flag = " *** ON HOLD ***" if "hold" in str(status).lower() else ""
+                print(f"VCS-{pid:<11} {str(name):<40} {str(status):<30}{flag}")
 
 # --- FIND ALL ON HOLD PROJECTS ---
 def find_all_on_hold(df):
-    status_col = next((c for c in df.columns if "status" in c.lower()), None)
-    id_col = next((c for c in df.columns if "id" in c.lower() or "project" in c.lower()), None)
+    id_col = next((c for c in df.columns if "id" in c.lower()), None)
     name_col = next((c for c in df.columns if "name" in c.lower()), None)
 
-    if not status_col:
-        print("ERROR: No status column found")
-        return
-
     on_hold = df[
-        df[status_col].astype(str).str.contains("hold|review|suspend", case=False, na=False)
+        df[STATUS_COL].astype(str).str.contains("hold|review|suspend", case=False, na=False)
     ]
 
-    print(f"\n--- ALL ON HOLD / UNDER REVIEW PROJECTS ({len(on_hold)} found) ---\n")
-    print(f"{'Project ID':<15} {'Name':<40} {'Status':<20}")
-    print("-" * 75)
+    print(f"\n--- ALL ON HOLD / UNDER REVIEW ({len(on_hold)} found) ---\n")
+    print(f"{'Project ID':<15} {'Name':<40} {'Status':<30}")
+    print("-" * 85)
 
     for _, row in on_hold.iterrows():
         pid = row[id_col] if id_col else "N/A"
         name = row[name_col] if name_col else "N/A"
-        status = row[status_col]
-        print(f"{str(pid):<15} {str(name):<40} {str(status):<20}")
+        status = row[STATUS_COL]
+        print(f"{str(pid):<15} {str(name):<40} {str(status):<30}")
 
-    # Export to CSV for use as audit queue
-    on_hold.to_csv("on_hold_audit_queue.csv", index=False)
-    print(f"\nExported to on_hold_audit_queue.csv")
+    on_hold.to_excel("on_hold_audit_queue.xlsx", index=False)
+    print(f"\nExported to on_hold_audit_queue.xlsx")
 
 # --- MAIN ---
 if __name__ == "__main__":
-    df = load_berkeley(BERKELEY_CSV)
-
+    df = load_berkeley(BERKELEY_XLSX)
     print("=== STATUS CHECK FOR KNOWN PROJECTS ===\n")
     check_status(df, PROJECT_IDS)
-
     print("\n=== FULL ON HOLD SCAN ===")
     find_all_on_hold(df)
