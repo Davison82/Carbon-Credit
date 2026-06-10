@@ -2,8 +2,7 @@ import pandas as pd
 import sys
 
 # --- CONFIG ---
-BERKELEY_XLSX = "Verra Database 2026 04.xlsx"
-SHEET_NAME = "PROJECTS"
+BERKELEY_CSV = "Verra Database 2026 04.csv"
 STATUS_COL = "Voluntary Status"
 
 PROJECT_IDS = [
@@ -16,7 +15,7 @@ PROJECT_IDS = [
 # --- LOAD DATABASE ---
 def load_berkeley(filepath):
     try:
-        df = pd.read_excel(filepath, sheet_name=SHEET_NAME)
+        df = pd.read_csv(filepath, low_memory=False)
         print(f"Loaded {len(df)} projects from Verra database\n")
         return df
     except FileNotFoundError:
@@ -28,7 +27,6 @@ def load_berkeley(filepath):
 
 # --- STATUS CHECKER ---
 def check_status(df, project_ids):
-    # Find the ID column
     id_col = next((c for c in df.columns if "id" in c.lower()), None)
     name_col = next((c for c in df.columns if "name" in c.lower()), None)
 
@@ -50,7 +48,7 @@ def check_status(df, project_ids):
         else:
             for _, row in match.iterrows():
                 name = row[name_col] if name_col else "N/A"
-                status = row[STATUS_COL]
+                status = row[STATUS_COL] if STATUS_COL in df.columns else "COLUMN NOT FOUND"
                 flag = " *** ON HOLD ***" if "hold" in str(status).lower() else ""
                 print(f"VCS-{pid:<11} {str(name):<40} {str(status):<30}{flag}")
 
@@ -58,6 +56,11 @@ def check_status(df, project_ids):
 def find_all_on_hold(df):
     id_col = next((c for c in df.columns if "id" in c.lower()), None)
     name_col = next((c for c in df.columns if "name" in c.lower()), None)
+
+    if STATUS_COL not in df.columns:
+        print(f"ERROR: Column '{STATUS_COL}' not found")
+        print("Available columns:", list(df.columns))
+        sys.exit(1)
 
     on_hold = df[
         df[STATUS_COL].astype(str).str.contains("hold|review|suspend", case=False, na=False)
@@ -73,13 +76,15 @@ def find_all_on_hold(df):
         status = row[STATUS_COL]
         print(f"{str(pid):<15} {str(name):<40} {str(status):<30}")
 
-    on_hold.to_excel("on_hold_audit_queue.xlsx", index=False)
-    print(f"\nExported to on_hold_audit_queue.xlsx")
+    on_hold.to_csv("on_hold_audit_queue.csv", index=False)
+    print(f"\nExported to on_hold_audit_queue.csv")
 
 # --- MAIN ---
 if __name__ == "__main__":
-    df = load_berkeley(BERKELEY_XLSX)
+    df = load_berkeley(BERKELEY_CSV)
+
     print("=== STATUS CHECK FOR KNOWN PROJECTS ===\n")
     check_status(df, PROJECT_IDS)
+
     print("\n=== FULL ON HOLD SCAN ===")
     find_all_on_hold(df)
