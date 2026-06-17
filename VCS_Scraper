@@ -20,6 +20,10 @@ HEADERS = {
     "Cache-Control": "max-age=0",
 }
 
+# ADD THESE TWO LINES HERE
+session = requests.Session()
+session.headers.update(HEADERS)
+
 # --- LOAD ON HOLD PROJECTS ---
 def load_on_hold(filepath):
     df = pd.read_csv(filepath)
