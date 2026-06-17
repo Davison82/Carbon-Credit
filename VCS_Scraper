@@ -40,7 +40,7 @@ def check_polygon_tokens(project_id):
     tokens_found = []
 
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = session.get(url, headers=HEADERS, timeout=15)
         if response.status_code != 200:
             return None, f"HTTP {response.status_code}"
 
@@ -138,7 +138,7 @@ def screen_on_hold_projects(df):
             })
 
         # Polite delay to avoid getting blocked
-        time.sleep(2)
+        time.sleep(4)
 
     # --- EXPORT FULL RESULTS ---
     results_df = pd.DataFrame(results)
