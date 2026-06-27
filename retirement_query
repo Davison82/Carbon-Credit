@@ -37,31 +37,31 @@ try:
         print(response.text)
 
     # Query TCO2 tokens
-retirement_query = """
-{
-  retirements(
-    first: 100
-    where: {token_contains: "981"}
-    orderBy: timestamp
-    orderDirection: desc
-  ) {
-    id
-    amount
-    timestamp
-    token {
-      name
-      symbol
-    }
-    certificate {
-      id
-      retiringEntityString
-      beneficiary {
+    retirement_query = """
+    {
+      retirements(
+        first: 100
+        where: {token_contains: "981"}
+        orderBy: timestamp
+        orderDirection: desc
+      ) {
         id
+        amount
+        timestamp
+        token {
+          name
+          symbol
+        }
+        certificate {
+          id
+          retiringEntityString
+          beneficiary {
+            id
+          }
+        }
       }
     }
-  }
-}
-"""
+    """
 
     print("\n" + "=" * 80)
     print("RUNNING TCO2 QUERY")
@@ -69,7 +69,7 @@ retirement_query = """
 
     response = requests.post(
         url,
-        json={"query": query},
+        json={"query": retirement_query},
         headers=headers,
         timeout=20,
     )
