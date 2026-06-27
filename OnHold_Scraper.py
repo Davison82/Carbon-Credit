@@ -12,7 +12,7 @@ def check_project_tokens(project_id):
         id
         name
         symbol
-        totalSupply
+        supply
       }
     }
     """ % project_id
@@ -45,8 +45,8 @@ for _, row in df.iterrows():
     tokens = check_project_tokens(numeric_id)
     
     # Filter out zero supply tokens
-    active_tokens = [t for t in tokens if int(t.get("totalSupply", 0)) > 0]
-    total_supply = sum(int(t.get("totalSupply", 0)) for t in active_tokens) / 1e18
+    active_tokens = [t for t in tokens if int(t.get("supply", 0)) > 0]
+    total_supply = sum(int(t.get("supply", 0)) for t in active_tokens) / 1e18
     
     if active_tokens:
         flag = " *** FINDING ***"
