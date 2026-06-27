@@ -39,10 +39,13 @@ try:
     # Query TCO2 tokens
     query = """
     {
-      tco2Tokens(first: 5) {
+      tco2Tokens(where: {
+        symbol_contains: "VCS-981"
+      }) {
         id
         name
         symbol
+        totalSupply
       }
     }
     """
