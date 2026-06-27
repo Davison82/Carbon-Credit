@@ -45,7 +45,7 @@ try:
         id
         name
         symbol
-        totalSupply
+        supply
       }
     }
     """
