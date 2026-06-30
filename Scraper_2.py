@@ -39,17 +39,25 @@ try:
     # Query TCO2 tokens
     query = """
     {
-      tco2Tokens(where: {
-        symbol_contains: "VCS-981"
-      }) {
+      retirements(
+        first: 1000
+        where: {token: "0xeaa9938076748d7edd4df0721b3e3fe4077349d3"}
+        orderBy: timestamp
+        orderDirection: asc
+      ) {
         id
-        name
-        symbol
-        supply
+        amount
+        timestamp
+        token {
+          symbol
+        }
+        certificate {
+          id
+          retiringEntityString
+        }
       }
     }
     """
-
     print("\n" + "=" * 80)
     print("RUNNING TCO2 QUERY")
     print("=" * 80)
