@@ -58,6 +58,7 @@ try:
       }
     }
     """
+    
     print("\n" + "=" * 80)
     print("RUNNING TCO2 QUERY")
     print("=" * 80)
