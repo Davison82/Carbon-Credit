@@ -1,142 +1,270 @@
-import csv
 import requests
+import pandas as pd
 import time
+import os
 
+# --- CONFIG ---
 API_KEY = "d562d03c4b1c92f7e710eff9b01cc6d0"
-CSV_FILENAME = "Verra 202604 Credits Issued.csv"
-PROJECT_ID = "981"
 
 CHAINS = {
-    "Polygon": f"https://thegraph.com{API_KEY}/subgraphs/id/FU5APMSSCqcRy9jy56aXJiGV3PQmFQHg2tzukvSJBgwW",
-    "Base": f"https://thegraph.com{API_KEY}/subgraphs/id/AEJ5PEDye6Z198HRQBioG6mZ6ZacHenBg2HTopZPsUCi",
-    "Celo": f"https://thegraph.com{API_KEY}/subgraphs/id/BWmN569zDopYXp3nzDukJsGDHqRstYAFULFPH8rxyVBk",
+    "Polygon": f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/FU5APMSSCqcRy9jy56aXJiGV3PQmFQHg2tzukvSJBgwW",
+    "Base":    f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/AEJ5PEDye6Z198HRQBioG6mZ6ZacHenBg2HTopZPsUCi",
+    "Celo":    f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/BWmN569zDopYXp3nzDukJsGDHqRstYAFULFPH8rxyVBk",
 }
 
-def extract_verra_issued_horizontal(project_id, file_path):
-    """Parses Row 1 for years 1996-2026, locates Column A for project match."""
-    try:
-        if not file_path.endswith('.csv'):
-            file_path += '.csv'
+VERRA_CSV = "Verra Database 2026 04.csv"
 
-        with open(file_path, mode='r', encoding='utf-8-sig') as f:
-            reader = csv.reader(f)
-            headers = [h.strip() for h in next(reader)]
-            
-            years_to_track = [str(year) for year in range(1996, 2027)]
-            year_indices = {year: headers.index(year) for year in years_to_track if year in headers}
-            
-            if not year_indices:
-                return {}
-
-            verra_issued_dict = {}
-
-            for row in reader:
-                if not row or row[0].strip() != str(project_id):
-                    continue
-                
-                project_name = row[1].strip() if len(row) > 1 else "Unknown"
-                print(f"🌲 Target Found: VCS-{project_id} | {project_name}")
-                
-                for year, idx in year_indices.items():
-                    if idx < len(row):
-                        val_str = row[idx].strip().replace(',', '')
-                        val = int(float(val_str)) if val_str and val_str != "0" else 0
-                        if val > 0:
-                            verra_issued_dict[year] = verra_issued_dict.get(year, 0) + val
-                return verra_issued_dict
-            return {}
-    except Exception as e:
-        print(f"❌ Baseline Ingestion Error: {e}")
+# --- LOAD VERRA BASELINE FROM CSV ---
+def load_verra_baseline(csv_path, project_id):
+    if not os.path.exists(csv_path):
+        print(f"ERROR: Cannot find {csv_path}")
         return {}
 
-def query_subgraph_tokens(endpoint, project_id):
-    """Pulls both live active supply AND historical retirement totals."""
+    df = pd.read_csv(csv_path, low_memory=False)
+
+    id_col = next((c for c in df.columns if "project id" in c.lower()), None)
+    if not id_col:
+        print("ERROR: Cannot find Project ID column")
+        return {}
+
+    # Match VCS981 format (no hyphen)
+    mask = df[id_col].astype(str).str.strip().str.fullmatch(
+        f"VCS{project_id}", case=False, na=False
+    )
+    match = df[mask]
+
+    if match.empty:
+        print(f"Project VCS{project_id} not found in Verra CSV")
+        return {}
+
+    row = match.iloc[0]
+    print(f"Found: {row.get('Project Name', 'Unknown')}")
+
+    # Only plain year columns — no .1 .2 .3 suffixes
+    year_cols = {
+        col.strip(): col for col in df.columns
+        if col.strip().isdigit() and 1990 <= int(col.strip()) <= 2030
+    }
+
+    if not year_cols:
+        print("ERROR: No vintage year columns found")
+        return {}
+
+    baseline = {}
+    for year_str, col in year_cols.items():
+        val = row[col]
+        if pd.notna(val) and str(val).strip() not in ["", "-", "0", "nan"]:
+            try:
+                issued = int(float(str(val).replace(",", "").replace(" ", "")))
+                if issued > 0:
+                    baseline[year_str] = issued
+            except ValueError:
+                continue
+
+    return baseline
+
+# --- QUERY ACTIVE SUPPLY PER TOKEN ---
+def get_active_supply(endpoint, contract_address):
+    """
+    Sums all tco2Balance entries for a contract to get
+    current active (unretired) supply.
+    """
+    query = """
+    {
+      tco2Balances(
+        where: {token: "%s"}
+        first: 1000
+      ) {
+        balance
+      }
+    }
+    """ % contract_address.lower()
+
+    try:
+        response = requests.post(
+            endpoint,
+            json={"query": query},
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        data = response.json()
+        balances = data.get("data", {}).get("tco2Balances", [])
+        total = sum(int(b["balance"]) for b in balances if b.get("balance"))
+        return total / 1e18
+    except Exception as e:
+        print(f"  Balance query error: {e}")
+        return 0.0
+
+# --- QUERY TOKENS AND RETIRED FOR A PROJECT ---
+def get_project_tokens(endpoint, project_id):
+    """
+    Returns all TCO2 tokens for a project with totalRetired.
+    """
     query = """
     {
       tco2Tokens(where: {symbol_contains: "VCS-%s"}) {
+        id
         symbol
-        totalSupply
         totalRetired
       }
     }
     """ % project_id
 
     try:
-        response = requests.post(endpoint, json={"query": query}, timeout=15)
-        response.raise_for_status()
-        return response.json().get("data", {}).get("tco2Tokens", [])
-    except Exception:
+        response = requests.post(
+            endpoint,
+            json={"query": query},
+            headers={"Content-Type": "application/json"},
+            timeout=15
+        )
+        data = response.json()
+        return data.get("data", {}).get("tco2Tokens", [])
+    except Exception as e:
+        print(f"  Token query error: {e}")
         return []
 
-def extract_vintage_from_symbol(symbol):
+def extract_vintage(symbol):
     parts = symbol.split("-")
-    return parts[-1][:4] if parts else "Unknown"
+    return parts[-1][:4] if len(parts) >= 4 else "unknown"
 
-def run_double_count_sentinel(project_id):
-    print("\n" + "="*95)
-    print(f"🛰️  ONCHAIN AUDIT: DOUBLE COUNT SENTINEL — TOTAL FOOTPRINT RECONCILIATION")
-    print("="*95 + "\n")
+# --- MAIN SENTINEL ---
+def run_preretirement_sentinel(project_id, verra_csv):
+    print(f"\n{'='*75}")
+    print(f"PRE-RETIREMENT DOUBLE COUNT SENTINEL — VCS-{project_id}")
+    print(f"Formula: Active Supply + Total Retired = Total Ever Minted")
+    print(f"Signal if: Total Ever Minted (any chain) > Verra Issued")
+    print(f"{'='*75}\n")
 
-    verra_baseline = extract_verra_issued_horizontal(project_id, CSV_FILENAME)
-    if not verra_baseline:
-        print("❌ Core pipeline termination: Verification database baseline empty.")
+    # Load Verra baseline
+    print("Loading Verra baseline from CSV...")
+    baseline = load_verra_baseline(verra_csv, project_id)
+    if not baseline:
+        print("ERROR: No baseline data found. Cannot run sentinel.")
         return
 
-    # Structure data tracking to hold both active (supply) and historical metrics (retired)
-    chain_data = {chain: {} for chain in CHAINS}
+    print(f"Verra baseline loaded: {len(baseline)} vintages found")
+    for vintage, issued in sorted(baseline.items()):
+        print(f"  {vintage}: {issued:,} issued")
+
+    # Collect data across all chains
+    print(f"\nQuerying chains...\n")
+
+    chain_data = {}
+
     for chain_name, endpoint in CHAINS.items():
-        print(f"🔄 Scanning live subgraphs on {chain_name} network...")
-        tokens = query_subgraph_tokens(endpoint, project_id)
-        
+        print(f"  {chain_name}:")
+        tokens = get_project_tokens(endpoint, project_id)
+
+        if not tokens:
+            print(f"    No tokens found")
+            chain_data[chain_name] = {}
+            time.sleep(0.5)
+            continue
+
+        chain_data[chain_name] = {}
+
         for token in tokens:
-            vintage = extract_vintage_from_symbol(token["symbol"])
-            active = float(token.get("totalSupply", 0)) / 1e18
-            retired = float(token.get("totalRetired", 0)) / 1e18
-            
+            vintage = extract_vintage(token["symbol"])
+            contract = token["id"]
+            retired = int(token.get("totalRetired", 0)) / 1e18
+
+            # Get active supply from balances
+            active = get_active_supply(endpoint, contract)
+            total_minted = retired + active
+
+            print(f"    {token['symbol']}")
+            print(f"      Retired:      {retired:>12,.2f} t")
+            print(f"      Active:       {active:>12,.2f} t")
+            print(f"      Total Minted: {total_minted:>12,.2f} t")
+
             if vintage not in chain_data[chain_name]:
-                chain_data[chain_name][vintage] = {"active": 0.0, "retired": 0.0}
-            
-            chain_data[chain_name][vintage]["active"] += active
+                chain_data[chain_name][vintage] = {
+                    "retired": 0.0,
+                    "active": 0.0,
+                    "total_minted": 0.0
+                }
+
             chain_data[chain_name][vintage]["retired"] += retired
-        time.sleep(0.5)
+            chain_data[chain_name][vintage]["active"] += active
+            chain_data[chain_name][vintage]["total_minted"] += total_minted
 
-    all_vintages = sorted(list(set(list(verra_baseline.keys()) + [v for c in chain_data.values() for v in c.keys()])))
+            time.sleep(0.5)
 
-    # Enhanced reporting layout
-    header = f"{'Vintage':<10}{'Active (Σ)':<14}{'Retired (Σ)':<14}{'Total Minted':<16}{'Verra Issued':<16}{'Audit Status'}"
-    print("\n" + header)
-    print("-" * len(header))
+        time.sleep(1)
 
-    red_certificates = []
+    # Build results table
+    all_vintages = sorted(set(
+        v for chain in chain_data.values() for v in chain.keys()
+    ) | set(baseline.keys()))
+
+    print(f"\n{'='*75}")
+    print(f"RESULTS TABLE")
+    print(f"{'='*75}\n")
+    print(f"{'Vintage':<10} {'Verra Issued':<16} {'Total Minted':<16} {'Active':<14} {'Retired':<14} {'Signal'}")
+    print("-" * 95)
+
+    findings = []
+    results = []
 
     for vintage in all_vintages:
-        verra_max = verra_baseline.get(vintage, 0)
-        
-        # Aggregate across all cross-chain subgraphs
-        total_active = sum(chain_data[c].get(vintage, {}).get("active", 0.0) for c in CHAINS)
-        total_retired = sum(chain_data[c].get(vintage, {}).get("retired", 0.0) for c in CHAINS)
-        
-        # YOUR EXCELLENT FORMULA LOGIC HERE:
-        total_historical_minted = total_active + total_retired
-        
-        print(f"{vintage:<10}{total_active:<14,.0f}{total_retired:<14,.0f}{total_historical_minted:<16,.0f}{verra_max:<16,.0f}", end="")
+        verra_issued = baseline.get(vintage, 0)
 
-        if total_historical_minted > verra_max:
-            print("🚨 RED CERTIFICATE: MINT OVERFLOW")
-            red_certificates.append((vintage, total_historical_minted, verra_max))
-        elif total_historical_minted > 0:
-            print("🟢 VERIFIED VALID")
-        else:
-            print("⚪ No Activity")
+        # Sum across all chains
+        total_minted_all = sum(
+            chain_data[c].get(vintage, {}).get("total_minted", 0)
+            for c in CHAINS
+        )
+        total_active_all = sum(
+            chain_data[c].get(vintage, {}).get("active", 0)
+            for c in CHAINS
+        )
+        total_retired_all = sum(
+            chain_data[c].get(vintage, {}).get("retired", 0)
+            for c in CHAINS
+        )
 
-    print("\n" + "="*95)
-    if red_certificates:
-        print(f"🛑 RECONCILIATION FAILURE: {len(red_certificates)} MINT INFLATION ANOMALIES FOUND")
-        for vintage, minted, issued in red_certificates:
-            print(f"  • Vintage {vintage}: Cumulative Minted ({minted:,.0f}) exceeds Verra Registry Max ({issued:,.0f}) by {minted-issued:,.0f} tonnes!")
+        # Signal logic
+        signal = ""
+        if verra_issued == 0 and total_minted_all > 0:
+            signal = "*** NO VERRA RECORD — GHOST MINT ***"
+            findings.append((vintage, "Ghost Mint", total_minted_all))
+        elif total_minted_all > verra_issued and verra_issued > 0:
+            overflow = total_minted_all - verra_issued
+            signal = f"*** OVER-MINTED by {overflow:,.0f} t ***"
+            findings.append((vintage, "Over-Minted", overflow))
+        elif total_active_all > 0 or total_retired_all > 0:
+            signal = "Activity — within limits"
+
+        print(f"{vintage:<10} {verra_issued:<16,} {total_minted_all:<16,.2f} {total_active_all:<14,.2f} {total_retired_all:<14,.2f} {signal}")
+
+        results.append({
+            "vintage": vintage,
+            "verra_issued": verra_issued,
+            "total_minted_all_chains": total_minted_all,
+            "total_active_all_chains": total_active_all,
+            "total_retired_all_chains": total_retired_all,
+            "signal": signal
+        })
+
+    # Export
+    results_df = pd.DataFrame(results)
+    output_file = f"preretirement_sentinel_VCS{project_id}.csv"
+    results_df.to_csv(output_file, index=False)
+
+    # Summary
+    print(f"\n{'='*75}")
+    print(f"SUMMARY — VCS-{project_id}")
+    print(f"{'='*75}")
+    if findings:
+        print(f"\n🔴 {len(findings)} RED FINDING(S):\n")
+        for vintage, flag_type, amount in findings:
+            print(f"  Vintage {vintage}: {flag_type} — {amount:,.2f} tonnes")
     else:
-        print("✅ AUDIT PASS: Absolute digital footprint completely verified within legacy issuance bounds.")
-    print("="*95 + "\n")
+        print(f"\n🟢 GREEN — No over-minting detected across {len(all_vintages)} vintages")
 
+    print(f"\nResults exported to {output_file}")
+    print(f"{'='*75}\n")
+
+# --- RUN ---
 if __name__ == "__main__":
-    run_double_count_sentinel(PROJECT_ID)
+    run_preretirement_sentinel("981", VERRA_CSV)
