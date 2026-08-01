@@ -72,24 +72,24 @@ def fetch_all_tokens(endpoint, chain_name, batch_size=1000):
 
     return all_tokens
 
-# --- CHECK POOL ASSIGNMENT ---
-def get_pool_assignment(endpoint, contract_address):
+# --- FETCH ACTIVE SUPPLY & POOL ASSIGNMENT IN ONE QUERY ---
+def get_token_balances_and_pool(endpoint, contract_address):
     """
-    Checks the largest holder of a token.
-    If it matches a known pool address, assigns that pool label.
+    Query balances for a token contract to retrieve:
+      1. Total active (unretired) supply across all wallets
+      2. Primary pool assignment label (if held by a known pool)
+      3. Detailed breakdown of pool holdings
     """
     query = """
     {
       tco2Balances(
         where: {token: "%s"}
-        orderBy: balance
-        orderDirection: desc
-        first: 1
+        first: 1000
       ) {
+        balance
         user {
           id
         }
-        balance
       }
     }
     """ % contract_address.lower()
@@ -104,19 +104,27 @@ def get_pool_assignment(endpoint, contract_address):
         data = response.json()
         balances = data.get("data", {}).get("tco2Balances", [])
 
-        if balances:
-            top_holder = balances[0]["user"]["id"].lower()
-            for pool_addr, pool_name in KNOWN_POOLS.items():
-                if top_holder == pool_addr.lower():
-                    return pool_name
+        total_active_raw = 0
+        pool_assignment = "ERC20 Raw TCO2"
+        pool_holdings = {}
 
-        return "ERC20 Raw TCO2"
+        for b in balances:
+            bal = int(b.get("balance", 0)) / 1e18
+            total_active_raw += bal
+            holder = b.get("user", {}).get("id", "").lower()
+
+            for pool_addr, pool_name in KNOWN_POOLS.items():
+                if holder == pool_addr.lower():
+                    pool_holdings[pool_name] = round(bal, 4)
+                    pool_assignment = pool_name
+
+        return round(total_active_raw, 4), pool_assignment, pool_holdings
 
     except Exception:
-        return "Unknown"
+        return 0.0, "Unknown", {}
 
 # --- PARSE TOKEN ---
-def parse_token(token, chain_name, pool_assignment):
+def parse_token(token, chain_name, pool_assignment, active_supply, pool_holdings):
     symbol = token.get("symbol", "")
     parts = symbol.split("-")
 
@@ -129,7 +137,8 @@ def parse_token(token, chain_name, pool_assignment):
         project_id = "unknown"
         vintage = "unknown"
 
-    retired_tonnes = int(token.get("totalRetired", 0)) / 1e18
+    retired_tonnes = round(int(token.get("totalRetired", 0)) / 1e18, 4)
+    total_minted = round(retired_tonnes + active_supply, 4)
 
     vintage_quantity = 0
     if token.get("projectVintage") and token["projectVintage"].get("totalVintageQuantity"):
@@ -145,16 +154,19 @@ def parse_token(token, chain_name, pool_assignment):
         "standard": standard,
         "project_id": project_id,
         "vintage": vintage,
-        "total_retired_tonnes": round(retired_tonnes, 4),
+        "total_retired_tonnes": retired_tonnes,
+        "active_supply": active_supply,
+        "total_minted_tonnes": total_minted,
         "verra_vintage_quantity": vintage_quantity,
         "pool_assignment": pool_assignment,
+        "pool_holdings": str(pool_holdings),
         "created_at": token.get("createdAt", "")
     }
 
 # --- BUILD UNIVERSE ---
 def build_universe():
     print("\n" + "="*70)
-    print("TOKENISATION UNIVERSE BUILDER v2 — WITH POOL TRACKING")
+    print("TOKENISATION UNIVERSE BUILDER v3 — SNAPSHOT GENERATOR")
     print("="*70 + "\n")
 
     all_records = []
@@ -165,16 +177,15 @@ def build_universe():
         print(f"  {chain_name}: {len(tokens)} total tokens\n")
 
         for i, token in enumerate(tokens):
-            # Only check pool assignment for tokens with retirement activity
-            # to avoid 1000+ API calls for zero-activity tokens
-            retired = int(token.get("totalRetired", 0)) / 1e18
-            if retired > 0:
-                pool = get_pool_assignment(endpoint, token["id"])
-                time.sleep(0.3)
-            else:
-                pool = "ERC20 Raw TCO2"
+            # Fetch active supply and pool information in one query
+            active_supply, pool, holdings = get_token_balances_and_pool(
+                endpoint, token["id"]
+            )
+            time.sleep(0.2)
 
-            record = parse_token(token, chain_name, pool)
+            record = parse_token(
+                token, chain_name, pool, active_supply, holdings
+            )
             all_records.append(record)
 
             if i % 50 == 0:
@@ -197,11 +208,11 @@ def build_universe():
     print(f"\nPool assignment breakdown:")
     print(df.groupby("pool_assignment")["symbol"].count().to_string())
     print(f"\nProjects with retirement activity: {df[df['total_retired_tonnes']>0]['project_id'].nunique()}")
-    print(f"Projects with zero retirements: {df[df['total_retired_tonnes']==0]['project_id'].nunique()}")
+    print(f"Projects with active supply: {df[df['active_supply']>0]['project_id'].nunique()}")
 
     # Export
     df.to_csv("tokenisation_universe.csv", index=False)
-    print(f"\nExported to tokenisation_universe.csv")
+    print(f"\nExported complete snapshot to tokenisation_universe.csv")
     print("="*70 + "\n")
 
     return df
