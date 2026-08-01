@@ -1,45 +1,32 @@
-import requests
 import pandas as pd
-import time
+import ast
 import os
 import sys
 
 # --- CONFIG ---
-API_KEY = "d562d03c4b1c92f7e710eff9b01cc6d0"
-
-CHAINS = {
-    "Polygon": f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/FU5APMSSCqcRy9jy56aXJiGV3PQmFQHg2tzukvSJBgwW",
-    "Base":    f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/AEJ5PEDye6Z198HRQBioG6mZ6ZacHenBg2HTopZPsUCi",
-    "Celo":    f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/BWmN569zDopYXp3nzDukJsGDHqRstYAFULFPH8rxyVBk",
-}
-
 VERRA_CSV = "Verra Database 2026 04.csv"
 UNIVERSE_CSV = "tokenisation_universe.csv"
 
-# Known pool contract addresses
-KNOWN_POOLS = {
-    "0xd838290e877e0188a4a44700463419ed96c16107": "NCT Pool",
-    "0x2f800db0fdb5223b3c3f354886d907a671414a7f": "BCT Pool",
-    "0xb139c4cc9d20a3618e9a2268d73eff18c496b991": "CHAR Pool",
-}
-
 # --- LOAD VERRA BASELINE ---
-def load_verra_baseline(df, project_id):
-    id_col = next((c for c in df.columns if "project id" in c.lower()), None)
+def load_verra_baseline(verra_df, project_id):
+    """
+    Extracts vintage issuance amounts for a given project ID from the Verra CSV.
+    """
+    id_col = next((c for c in verra_df.columns if "project id" in c.lower()), None)
     if not id_col:
         return {}
 
-    mask = df[id_col].astype(str).str.strip().str.fullmatch(
+    mask = verra_df[id_col].astype(str).str.strip().str.fullmatch(
         f"VCS{project_id}", case=False, na=False
     )
-    match = df[mask]
+    match = verra_df[mask]
     if match.empty:
         return {}
 
     row = match.iloc[0]
 
     year_cols = {
-        col.strip(): col for col in df.columns
+        col.strip(): col for col in verra_df.columns
         if col.strip().isdigit() and 1990 <= int(col.strip()) <= 2030
     }
 
@@ -57,154 +44,26 @@ def load_verra_baseline(df, project_id):
     return baseline
 
 # --- GET PROJECT NAME ---
-def get_project_name(df, project_id):
-    id_col = next((c for c in df.columns if "project id" in c.lower()), None)
-    name_col = next((c for c in df.columns if "project name" in c.lower()), None)
+def get_project_name(verra_df, project_id):
+    id_col = next((c for c in verra_df.columns if "project id" in c.lower()), None)
+    name_col = next((c for c in verra_df.columns if "project name" in c.lower()), None)
     if not id_col or not name_col:
         return "Unknown"
-    mask = df[id_col].astype(str).str.strip().str.fullmatch(
+    mask = verra_df[id_col].astype(str).str.strip().str.fullmatch(
         f"VCS{project_id}", case=False, na=False
     )
-    match = df[mask]
+    match = verra_df[mask]
     if match.empty:
         return "Unknown"
     return match.iloc[0][name_col]
 
-# --- GET ACTIVE SUPPLY WITH POOL DETECTION ---
-def get_active_supply(endpoint, contract_address):
-    query = """
-    {
-      tco2Balances(
-        where: {token: "%s"}
-        first: 1000
-      ) {
-        balance
-        user {
-          id
-        }
-      }
-    }
-    """ % contract_address.lower()
-
-    try:
-        response = requests.post(
-            endpoint,
-            json={"query": query},
-            headers={"Content-Type": "application/json"},
-            timeout=15
-        )
-        data = response.json()
-        balances = data.get("data", {}).get("tco2Balances", [])
-
-        total = 0
-        pool_holdings = {}
-
-        for b in balances:
-            bal = int(b.get("balance", 0))
-            total += bal
-            holder = b.get("user", {}).get("id", "").lower()
-            for pool_addr, pool_name in KNOWN_POOLS.items():
-                if holder == pool_addr.lower():
-                    pool_holdings[pool_name] = bal / 1e18
-
-        return total / 1e18, pool_holdings
-
-    except Exception as e:
-        return 0.0, {}
-
-# --- GET PROJECT TOKENS ---
-def get_project_tokens(endpoint, project_id):
-    query = """
-    {
-      tco2Tokens(where: {symbol_contains: "VCS-%s"}) {
-        id
-        symbol
-        totalRetired
-      }
-    }
-    """ % project_id
-
-    try:
-        response = requests.post(
-            endpoint,
-            json={"query": query},
-            headers={"Content-Type": "application/json"},
-            timeout=15
-        )
-        data = response.json()
-        return data.get("data", {}).get("tco2Tokens", [])
-    except Exception as e:
-        return []
-
-def extract_vintage(symbol):
-    parts = symbol.split("-")
-    return parts[-1][:4] if len(parts) >= 4 else "unknown"
-
-# --- SIMULTANEOUS MULTI-CHAIN HOLDINGS CHECK ---
-def check_simultaneous_multichain_holdings(project_id, verbose=True):
-    """
-    Checks if the same vintage has non-zero active supply
-    on multiple chains simultaneously — potential double minting.
-    """
-    if verbose:
-        print(f"\n--- SIMULTANEOUS MULTI-CHAIN HOLDINGS CHECK ---")
-
-    vintage_chain_supply = {}
-
-    for chain_name, endpoint in CHAINS.items():
-        tokens = get_project_tokens(endpoint, project_id)
-
-        for token in tokens:
-            vintage = extract_vintage(token["symbol"])
-            contract = token["id"]
-            active, _ = get_active_supply(endpoint, contract)
-
-            if vintage not in vintage_chain_supply:
-                vintage_chain_supply[vintage] = {}
-            vintage_chain_supply[vintage][chain_name] = active
-            time.sleep(0.3)
-
-    findings = []
-
-    for vintage, chain_supplies in sorted(vintage_chain_supply.items()):
-        active_chains = {
-            chain: supply
-            for chain, supply in chain_supplies.items()
-            if supply > 0
-        }
-
-        if len(active_chains) > 1:
-            total_active = sum(active_chains.values())
-            if verbose:
-                print(f"  ⚠️  Vintage {vintage}: Active on {len(active_chains)} chains — {total_active:,.4f} t total")
-                for chain, supply in active_chains.items():
-                    print(f"       {chain}: {supply:,.4f} t")
-            findings.append({
-                "vintage": vintage,
-                "active_chains": active_chains,
-                "total_active": total_active
-            })
-        else:
-            if active_chains and verbose:
-                chain = list(active_chains.keys())[0]
-                supply = list(active_chains.values())[0]
-                print(f"  ✅  Vintage {vintage}: Single chain ({chain}: {supply:,.4f} t)")
-            elif verbose:
-                print(f"  ✅  Vintage {vintage}: Zero active supply")
-
-    if not findings and verbose:
-        print(f"  No simultaneous multi-chain holdings detected")
-
-    return findings
-
-# --- RUN SENTINEL FOR ONE PROJECT ---
-def run_preretirement_sentinel(project_id, verra_df, verbose=True):
-
+# --- RUN SENTINEL FOR ONE PROJECT (OFFLINE) ---
+def run_preretirement_sentinel_offline(project_id, universe_df, verra_df, verbose=True):
     project_name = get_project_name(verra_df, project_id)
 
     if verbose:
         print(f"\n{'='*75}")
-        print(f"PRE-RETIREMENT SENTINEL — VCS-{project_id}")
+        print(f"OFFLINE PRE-RETIREMENT SENTINEL — VCS-{project_id}")
         print(f"Project: {project_name}")
         print(f"Formula: Active Supply + Total Retired = Total Ever Minted")
         print(f"Signal if: Total Ever Minted > Verra Issued")
@@ -216,51 +75,63 @@ def run_preretirement_sentinel(project_id, verra_df, verbose=True):
             print(f"  No Verra baseline found — skipping")
         return None
 
-    if verbose:
-        print(f"\nVerra baseline: {len(baseline)} vintages")
-        for vintage, issued in sorted(baseline.items()):
-            print(f"  {vintage}: {issued:,} issued")
+    # Filter snapshot data for this VCS project
+    proj_tokens = universe_df[
+        (universe_df["standard"] == "VCS") & 
+        (universe_df["project_id"].astype(str).str.split('.').str[0].str.strip() == str(project_id).strip())
+    ].copy()
 
-    chain_data = {}
+    # Normalize vintage column to clean YYYY strings
+    if not proj_tokens.empty:
+        proj_tokens["vintage"] = proj_tokens["vintage"].astype(str).str.split('.').str[0].str.strip()
+
+    # Calculate multi-chain active holdings
+    multichain_findings = []
+    if not proj_tokens.empty:
+        active_tokens = proj_tokens[proj_tokens["active_supply"] > 0]
+        vintages_multichain = active_tokens.groupby("vintage")["chain"].nunique()
+        vintages_multichain = vintages_multichain[vintages_multichain > 1].index.tolist()
+
+        for vm in vintages_multichain:
+            sub = active_tokens[active_tokens["vintage"] == vm]
+            active_chains = dict(zip(sub["chain"], sub["active_supply"]))
+            multichain_findings.append({
+                "vintage": vm,
+                "active_chains": active_chains,
+                "total_active": sum(active_chains.values())
+            })
+
+    # Extract pool contamination
     pool_contamination = {}
+    for _, row in proj_tokens.iterrows():
+        holdings_str = row.get("pool_holdings", "{}")
+        try:
+            holdings = ast.literal_eval(holdings_str) if isinstance(holdings_str, str) else holdings_str
+        except Exception:
+            holdings = {}
 
-    for chain_name, endpoint in CHAINS.items():
-        tokens = get_project_tokens(endpoint, project_id)
-        chain_data[chain_name] = {}
+        if isinstance(holdings, dict) and holdings:
+            key = f"Vintage {row['vintage']} ({row['chain']})"
+            if key not in pool_contamination:
+                pool_contamination[key] = {}
+            for pool_name, amt in holdings.items():
+                if amt > 0:
+                    pool_contamination[key][pool_name] = amt
 
-        for token in tokens:
-            vintage = extract_vintage(token["symbol"])
-            contract = token["id"]
-            retired = int(token.get("totalRetired", 0)) / 1e18
-            active, pool_holdings = get_active_supply(endpoint, contract)
-            total_minted = retired + active
+    # Aggregate token stats by vintage across all chains
+    if not proj_tokens.empty:
+        chain_agg = proj_tokens.groupby("vintage").agg(
+            retired=('total_retired_tonnes', 'sum'),
+            active=('active_supply', 'sum'),
+            minted=('total_minted_tonnes', 'sum')
+        ).to_dict(orient="index")
+    else:
+        chain_agg = {}
 
-            if vintage not in chain_data[chain_name]:
-                chain_data[chain_name][vintage] = {
-                    "retired": 0.0,
-                    "active": 0.0,
-                    "total_minted": 0.0
-                }
+    clean_chain_keys = {str(k).split('.')[0].strip() for k in chain_agg.keys() if pd.notna(k)}
+    clean_base_keys = {str(k).split('.')[0].strip() for k in baseline.keys() if pd.notna(k)}
 
-            chain_data[chain_name][vintage]["retired"] += retired
-            chain_data[chain_name][vintage]["active"] += active
-            chain_data[chain_name][vintage]["total_minted"] += total_minted
-
-            # Record pool contamination with pool name and vintage
-            for pool_name, pool_tonnes in pool_holdings.items():
-                key = f"Vintage {vintage} ({chain_name})"
-                if key not in pool_contamination:
-                    pool_contamination[key] = {}
-                pool_contamination[key][pool_name] = pool_tonnes
-
-            time.sleep(0.3)
-
-        time.sleep(0.5)
-
-    # Build results table
-    all_vintages = sorted(set(
-        v for chain in chain_data.values() for v in chain.keys()
-    ) | set(baseline.keys()))
+    all_vintages = sorted(set(clean_chain_keys) | set(clean_base_keys))
 
     findings = []
     results = []
@@ -271,19 +142,11 @@ def run_preretirement_sentinel(project_id, verra_df, verbose=True):
 
     for vintage in all_vintages:
         verra_issued = baseline.get(vintage, 0)
+        v_data = chain_agg.get(vintage, {"retired": 0.0, "active": 0.0, "minted": 0.0})
 
-        total_minted_all = sum(
-            chain_data[c].get(vintage, {}).get("total_minted", 0)
-            for c in CHAINS
-        )
-        total_active_all = sum(
-            chain_data[c].get(vintage, {}).get("active", 0)
-            for c in CHAINS
-        )
-        total_retired_all = sum(
-            chain_data[c].get(vintage, {}).get("retired", 0)
-            for c in CHAINS
-        )
+        total_minted_all = v_data["minted"]
+        total_active_all = v_data["active"]
+        total_retired_all = v_data["retired"]
 
         signal = ""
         if verra_issued == 0 and total_minted_all > 0:
@@ -297,7 +160,7 @@ def run_preretirement_sentinel(project_id, verra_df, verbose=True):
             signal = "Within limits"
 
         if verbose:
-            print(f"{vintage:<10} {verra_issued:<16,} {total_minted_all:<16,.2f} {total_active_all:<14,.2f} {total_retired_all:<14,.2f} {signal}")
+            print(f"{str(vintage):<10} {verra_issued:<16,} {total_minted_all:<16,.2f} {total_active_all:<14,.2f} {total_retired_all:<14,.2f} {signal}")
 
         results.append({
             "project_id": f"VCS-{project_id}",
@@ -310,23 +173,23 @@ def run_preretirement_sentinel(project_id, verra_df, verbose=True):
             "signal": signal if signal else "Clean"
         })
 
-    # Pool contamination report
-    if verbose and pool_contamination:
-        print(f"\n--- POOL CONTAMINATION ---")
-        for vintage_chain, pools in sorted(pool_contamination.items()):
-            for pool_name, tonnes in pools.items():
-                if tonnes > 0:
-                    print(f"  {vintage_chain} → {pool_name}: {tonnes:,.2f} t")
-
-    # Simultaneous multi-chain holdings check
-    multichain_findings = check_simultaneous_multichain_holdings(
-        project_id, verbose=verbose
-    )
-
     # Certificate
     cert = "RED" if (findings or multichain_findings) else "GREEN"
 
     if verbose:
+        if pool_contamination:
+            print(f"\n--- POOL CONTAMINATION ---")
+            for vintage_chain, pools in sorted(pool_contamination.items()):
+                for pool_name, tonnes in pools.items():
+                    print(f"  {vintage_chain} → {pool_name}: {tonnes:,.2f} t")
+
+        if multichain_findings:
+            print(f"\n--- SIMULTANEOUS MULTI-CHAIN HOLDINGS CHECK ---")
+            for f in multichain_findings:
+                print(f"  ⚠️  Vintage {f['vintage']}: Active on {len(f['active_chains'])} chains — {f['total_active']:,.4f} t total")
+                for chain, supply in f['active_chains'].items():
+                    print(f"       {chain}: {supply:,.4f} t")
+
         print(f"\n{'='*75}")
         print(f"CERTIFICATE: {cert} — VCS-{project_id} {project_name}")
         if findings:
@@ -350,31 +213,29 @@ def run_preretirement_sentinel(project_id, verra_df, verbose=True):
         "pool_contamination": pool_contamination,
         "results": results
     }
-
-# --- RUN ACROSS ALL PROJECTS ---
-def run_full_audit():
+# --- RUN ACROSS ALL PROJECTS (FULL OFFLINE AUDIT) ---
+def run_full_offline_audit():
     print("\n" + "="*75)
-    print("ONCHAIN AUDIT — FULL UNIVERSE PRE-RETIREMENT SENTINEL")
+    print("ONCHAIN AUDIT — 100% OFFLINE PRE-RETIREMENT SENTINEL")
     print("="*75)
 
     if not os.path.exists(VERRA_CSV):
         print(f"ERROR: Cannot find {VERRA_CSV}")
         return
 
-    print(f"Loading Verra database...")
-    verra_df = pd.read_csv(VERRA_CSV, low_memory=False)
-    print(f"Loaded {len(verra_df)} projects\n")
-
     if not os.path.exists(UNIVERSE_CSV):
         print(f"ERROR: Cannot find {UNIVERSE_CSV}")
         return
 
-    universe = pd.read_csv(UNIVERSE_CSV)
-    vcs_projects = sorted(universe[
-        universe["standard"] == "VCS"
-    ]["project_id"].unique())
+    print(f"Loading Verra database and Snapshot CSV...")
+    verra_df = pd.read_csv(VERRA_CSV, low_memory=False)
+    universe_df = pd.read_csv(UNIVERSE_CSV)
 
-    print(f"Auditing {len(vcs_projects)} tokenised VCS projects...\n")
+    vcs_projects = sorted(universe_df[
+        universe_df["standard"] == "VCS"
+    ]["project_id"].astype(str).unique())
+
+    print(f"Auditing {len(vcs_projects)} tokenised VCS projects offline...\n")
 
     all_results = []
     red_certs = []
@@ -383,14 +244,11 @@ def run_full_audit():
     multichain_alerts = []
 
     for i, project_id in enumerate(vcs_projects):
-        print(f"[{i+1}/{len(vcs_projects)}] VCS-{project_id}...", end=" ", flush=True)
-
-        result = run_preretirement_sentinel(
-            project_id, verra_df, verbose=False
+        result = run_preretirement_sentinel_offline(
+            project_id, universe_df, verra_df, verbose=False
         )
 
         if result is None:
-            print("No baseline — skipped")
             continue
 
         cert = result["certificate"]
@@ -401,7 +259,7 @@ def run_full_audit():
         )
         multichain_count = len(result["multichain_findings"])
 
-        status_parts = [cert]
+        status_parts = [f"[{i+1}/{len(vcs_projects)}] VCS-{project_id}", cert]
         if findings_count:
             status_parts.append(f"{findings_count} mint findings")
         if pool_count:
@@ -437,15 +295,13 @@ def run_full_audit():
                 "findings": result["multichain_findings"]
             })
 
-        time.sleep(1)
-
-    # Export
+    # Export Results
     results_df = pd.DataFrame(all_results)
     results_df.to_csv("full_audit_results.csv", index=False)
 
-    # Summary
+    # Summary Output
     print(f"\n{'='*75}")
-    print(f"FULL AUDIT COMPLETE")
+    print(f"FULL AUDIT COMPLETE (OFFLINE)")
     print(f"{'='*75}")
     print(f"Total projects audited: {len(red_certs) + len(green_certs)}")
     print(f"🔴 RED CERTIFICATES: {len(red_certs)}")
@@ -480,19 +336,20 @@ def run_full_audit():
             print(f"\n  {ma['project_id']} — {ma['name']}")
             for f in ma['findings']:
                 chains = ", ".join(
-                    f"{c}: {s:,.4f}t" for c, s in f['active_chains'].items()
+                    f"{c}: {s:,.4f}t" for c, s in f['findings']
                 )
                 print(f"    Vintage {f['vintage']}: {chains}")
 
     print(f"\nFull results exported to full_audit_results.csv")
     print(f"{'='*75}\n")
 
-# --- MAIN ---
+# --- MAIN ENTRY POINT ---
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        # Single project verbose mode
+        # Single project verbose mode: python PreRetirement_Sentinel.py 981
         verra_df = pd.read_csv(VERRA_CSV, low_memory=False)
-        run_preretirement_sentinel(sys.argv[1], verra_df, verbose=True)
+        universe_df = pd.read_csv(UNIVERSE_CSV)
+        run_preretirement_sentinel_offline(sys.argv[1], universe_df, verra_df, verbose=True)
     else:
-        # Full universe audit
-        run_full_audit()
+        # Full universe offline audit
+        run_full_offline_audit()
