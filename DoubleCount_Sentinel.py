@@ -1,54 +1,30 @@
-import requests
 import pandas as pd
-import time
 import os
+import sys
 
 # --- CONFIG ---
-API_KEY = "d562d03c4b1c92f7e710eff9b01cc6d0"
-
-CHAINS = {
-    "Polygon": f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/FU5APMSSCqcRy9jy56aXJiGV3PQmFQHg2tzukvSJBgwW",
-    "Base":    f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/AEJ5PEDye6Z198HRQBioG6mZ6ZacHenBg2HTopZPsUCi",
-    "Celo":    f"https://gateway-arbitrum.network.thegraph.com/api/{API_KEY}/subgraphs/id/BWmN569zDopYXp3nzDukJsGDHqRstYAFULFPH8rxyVBk",
-}
-
+UNIVERSE_CSV = "tokenisation_universe.csv"
 VERRA_CSV = "Verra Database 2026 04.csv"
 
-# --- LOAD VERRA BASELINE FROM CSV ---
-def load_verra_baseline(csv_path, project_id):
-    if not os.path.exists(csv_path):
-        print(f"ERROR: Cannot find {csv_path}")
-        return {}
-
-    df = pd.read_csv(csv_path, low_memory=False)
-
-    id_col = next((c for c in df.columns if "project id" in c.lower()), None)
+# --- LOAD VERRA BASELINE ---
+def load_verra_baseline(verra_df, project_id):
+    id_col = next((c for c in verra_df.columns if "project id" in c.lower()), None)
     if not id_col:
-        print("ERROR: Cannot find Project ID column")
         return {}
 
-    # Match VCS981 format (no hyphen)
-    mask = df[id_col].astype(str).str.strip().str.fullmatch(
+    mask = verra_df[id_col].astype(str).str.strip().str.fullmatch(
         f"VCS{project_id}", case=False, na=False
     )
-    match = df[mask]
-
+    match = verra_df[mask]
     if match.empty:
-        print(f"Project VCS{project_id} not found in Verra CSV")
         return {}
 
     row = match.iloc[0]
-    print(f"Found: {row.get('Project Name', 'Unknown')}")
 
-    # Only plain year columns — no .1 .2 .3 suffixes
     year_cols = {
-        col.strip(): col for col in df.columns
+        col.strip(): col for col in verra_df.columns
         if col.strip().isdigit() and 1990 <= int(col.strip()) <= 2030
     }
-
-    if not year_cols:
-        print("ERROR: No vintage year columns found")
-        return {}
 
     baseline = {}
     for year_str, col in year_cols.items():
@@ -63,208 +39,226 @@ def load_verra_baseline(csv_path, project_id):
 
     return baseline
 
-# --- QUERY ACTIVE SUPPLY PER TOKEN ---
-def get_active_supply(endpoint, contract_address):
-    """
-    Sums all tco2Balance entries for a contract to get
-    current active (unretired) supply.
-    """
-    query = """
-    {
-      tco2Balances(
-        where: {token: "%s"}
-        first: 1000
-      ) {
-        balance
-      }
-    }
-    """ % contract_address.lower()
+# --- GET PROJECT NAME ---
+def get_project_name(verra_df, project_id):
+    id_col = next((c for c in verra_df.columns if "project id" in c.lower()), None)
+    name_col = next((c for c in verra_df.columns if "project name" in c.lower()), None)
+    if not id_col or not name_col:
+        return "Unknown"
+    mask = verra_df[id_col].astype(str).str.strip().str.fullmatch(
+        f"VCS{project_id}", case=False, na=False
+    )
+    match = verra_df[mask]
+    if match.empty:
+        return "Unknown"
+    return match.iloc[0][name_col]
 
-    try:
-        response = requests.post(
-            endpoint,
-            json={"query": query},
-            headers={"Content-Type": "application/json"},
-            timeout=15
-        )
-        data = response.json()
-        balances = data.get("data", {}).get("tco2Balances", [])
-        total = sum(int(b["balance"]) for b in balances if b.get("balance"))
-        return total / 1e18
-    except Exception as e:
-        print(f"  Balance query error: {e}")
-        return 0.0
+# --- RUN DOUBLE COUNT SENTINEL FOR ONE PROJECT ---
+def run_double_count_sentinel(project_id, universe_df, verra_df, verbose=True):
 
-# --- QUERY TOKENS AND RETIRED FOR A PROJECT ---
-def get_project_tokens(endpoint, project_id):
-    """
-    Returns all TCO2 tokens for a project with totalRetired.
-    """
-    query = """
-    {
-      tco2Tokens(where: {symbol_contains: "VCS-%s"}) {
-        id
-        symbol
-        totalRetired
-      }
-    }
-    """ % project_id
+    project_name = get_project_name(verra_df, project_id)
 
-    try:
-        response = requests.post(
-            endpoint,
-            json={"query": query},
-            headers={"Content-Type": "application/json"},
-            timeout=15
-        )
-        data = response.json()
-        return data.get("data", {}).get("tco2Tokens", [])
-    except Exception as e:
-        print(f"  Token query error: {e}")
-        return []
-
-def extract_vintage(symbol):
-    parts = symbol.split("-")
-    return parts[-1][:4] if len(parts) >= 4 else "unknown"
-
-# --- MAIN SENTINEL ---
-def run_preretirement_sentinel(project_id, verra_csv):
-    print(f"\n{'='*75}")
-    print(f"PRE-RETIREMENT DOUBLE COUNT SENTINEL — VCS-{project_id}")
-    print(f"Formula: Active Supply + Total Retired = Total Ever Minted")
-    print(f"Signal if: Total Ever Minted (any chain) > Verra Issued")
-    print(f"{'='*75}\n")
+    if verbose:
+        print(f"\n{'='*75}")
+        print(f"DOUBLE COUNT SENTINEL — VCS-{project_id}")
+        print(f"Project: {project_name}")
+        print(f"Method: Cross-chain retirement totals vs Verra issued")
+        print(f"Signal if: Combined retired (all chains) > Verra issued")
+        print(f"{'='*75}")
 
     # Load Verra baseline
-    print("Loading Verra baseline from CSV...")
-    baseline = load_verra_baseline(verra_csv, project_id)
-    if not baseline:
-        print("ERROR: No baseline data found. Cannot run sentinel.")
-        return
+    baseline = load_verra_baseline(verra_df, project_id)
+    if not baseline and verbose:
+        print(f"  No Verra baseline found — continuing with blockchain data only")
 
-    print(f"Verra baseline loaded: {len(baseline)} vintages found")
-    for vintage, issued in sorted(baseline.items()):
-        print(f"  {vintage}: {issued:,} issued")
+    # Filter universe for this project
+    proj_tokens = universe_df[
+        (universe_df["standard"] == "VCS") &
+        (universe_df["project_id"].astype(str).str.split('.').str[0].str.strip() == str(project_id).strip())
+    ].copy()
 
-    # Collect data across all chains
-    print(f"\nQuerying chains...\n")
+    if proj_tokens.empty:
+        if verbose:
+            print(f"  No tokens found in universe for VCS-{project_id}")
+        return None
 
-    chain_data = {}
+    # Normalise vintage to clean 4-digit string
+    proj_tokens["vintage"] = proj_tokens["vintage"].astype(str).str.split('.').str[0].str.strip()
 
-    for chain_name, endpoint in CHAINS.items():
-        print(f"  {chain_name}:")
-        tokens = get_project_tokens(endpoint, project_id)
+    # Aggregate retired tonnes by vintage and chain
+    chain_pivot = proj_tokens.groupby(["vintage", "chain"])["total_retired_tonnes"].sum().reset_index()
 
-        if not tokens:
-            print(f"    No tokens found")
-            chain_data[chain_name] = {}
-            time.sleep(0.5)
-            continue
-
-        chain_data[chain_name] = {}
-
-        for token in tokens:
-            vintage = extract_vintage(token["symbol"])
-            contract = token["id"]
-            retired = int(token.get("totalRetired", 0)) / 1e18
-
-            # Get active supply from balances
-            active = get_active_supply(endpoint, contract)
-            total_minted = retired + active
-
-            print(f"    {token['symbol']}")
-            print(f"      Retired:      {retired:>12,.2f} t")
-            print(f"      Active:       {active:>12,.2f} t")
-            print(f"      Total Minted: {total_minted:>12,.2f} t")
-
-            if vintage not in chain_data[chain_name]:
-                chain_data[chain_name][vintage] = {
-                    "retired": 0.0,
-                    "active": 0.0,
-                    "total_minted": 0.0
-                }
-
-            chain_data[chain_name][vintage]["retired"] += retired
-            chain_data[chain_name][vintage]["active"] += active
-            chain_data[chain_name][vintage]["total_minted"] += total_minted
-
-            time.sleep(0.5)
-
-        time.sleep(1)
-
-    # Build results table
+    # Get all vintages
     all_vintages = sorted(set(
-        v for chain in chain_data.values() for v in chain.keys()
-    ) | set(baseline.keys()))
+        proj_tokens["vintage"].unique().tolist() +
+        list(baseline.keys())
+    ))
 
-    print(f"\n{'='*75}")
-    print(f"RESULTS TABLE")
-    print(f"{'='*75}\n")
-    print(f"{'Vintage':<10} {'Verra Issued':<16} {'Total Minted':<16} {'Active':<14} {'Retired':<14} {'Signal'}")
-    print("-" * 95)
+    chains = sorted(proj_tokens["chain"].unique().tolist())
 
     findings = []
     results = []
 
+    if verbose:
+        # Build header
+        header = f"{'Vintage':<10}"
+        for chain in chains:
+            header += f"{chain:<16}"
+        header += f"{'Combined':<16} {'Verra Issued':<16} {'Signal'}"
+        print(f"\n{header}")
+        print("-" * (10 + 16 * len(chains) + 32 + 20))
+
     for vintage in all_vintages:
         verra_issued = baseline.get(vintage, 0)
+        combined = 0.0
+        chain_amounts = {}
 
-        # Sum across all chains
-        total_minted_all = sum(
-            chain_data[c].get(vintage, {}).get("total_minted", 0)
-            for c in CHAINS
-        )
-        total_active_all = sum(
-            chain_data[c].get(vintage, {}).get("active", 0)
-            for c in CHAINS
-        )
-        total_retired_all = sum(
-            chain_data[c].get(vintage, {}).get("retired", 0)
-            for c in CHAINS
-        )
+        for chain in chains:
+            mask = (
+                (chain_pivot["vintage"] == vintage) &
+                (chain_pivot["chain"] == chain)
+            )
+            amount = chain_pivot[mask]["total_retired_tonnes"].sum() if mask.any() else 0.0
+            chain_amounts[chain] = amount
+            combined += amount
 
         # Signal logic
         signal = ""
-        if verra_issued == 0 and total_minted_all > 0:
-            signal = "*** NO VERRA RECORD — GHOST MINT ***"
-            findings.append((vintage, "Ghost Mint", total_minted_all))
-        elif total_minted_all > verra_issued and verra_issued > 0:
-            overflow = total_minted_all - verra_issued
-            signal = f"*** OVER-MINTED by {overflow:,.0f} t ***"
-            findings.append((vintage, "Over-Minted", overflow))
-        elif total_active_all > 0 or total_retired_all > 0:
-            signal = "Activity — within limits"
+        if verra_issued == 0 and combined > 0:
+            signal = "*** GHOST RETIREMENT — NO VERRA RECORD ***"
+            findings.append((vintage, "Ghost Retirement", combined))
+        elif combined > verra_issued and verra_issued > 0:
+            overflow = combined - verra_issued
+            signal = f"*** OVER-RETIRED +{overflow:,.0f} t ***"
+            findings.append((vintage, "Over-Retired", overflow))
+        elif combined > 0:
+            signal = "Within limits"
 
-        print(f"{vintage:<10} {verra_issued:<16,} {total_minted_all:<16,.2f} {total_active_all:<14,.2f} {total_retired_all:<14,.2f} {signal}")
+        if verbose:
+            row_str = f"{vintage:<10}"
+            for chain in chains:
+                row_str += f"{chain_amounts.get(chain, 0.0):<16,.2f}"
+            row_str += f"{combined:<16,.2f} {verra_issued:<16,} {signal}"
+            print(row_str)
 
         results.append({
+            "project_id": f"VCS-{project_id}",
+            "project_name": project_name,
             "vintage": vintage,
             "verra_issued": verra_issued,
-            "total_minted_all_chains": total_minted_all,
-            "total_active_all_chains": total_active_all,
-            "total_retired_all_chains": total_retired_all,
-            "signal": signal
+            "combined_retired_all_chains": round(combined, 4),
+            **{f"retired_{chain.lower()}": round(chain_amounts.get(chain, 0.0), 4) for chain in chains},
+            "signal": signal if signal else "Clean"
         })
 
+    cert = "RED" if findings else "GREEN"
+
+    if verbose:
+        print(f"\n{'='*75}")
+        print(f"CERTIFICATE: {cert} — VCS-{project_id} {project_name}")
+        if findings:
+            for vintage, flag_type, amount in findings:
+                print(f"  🔴 Vintage {vintage}: {flag_type} — {amount:,.2f} t")
+        else:
+            print(f"  🟢 No cross-chain double count signals detected")
+        print(f"{'='*75}\n")
+
+    return {
+        "project_id": f"VCS-{project_id}",
+        "project_name": project_name,
+        "certificate": cert,
+        "findings": findings,
+        "results": results
+    }
+
+# --- RUN FULL AUDIT ---
+def run_full_audit():
+    print("\n" + "="*75)
+    print("DOUBLE COUNT SENTINEL — FULL UNIVERSE AUDIT (OFFLINE)")
+    print("="*75)
+
+    if not os.path.exists(UNIVERSE_CSV):
+        print(f"ERROR: Cannot find {UNIVERSE_CSV} — run MasterTokenisation.py first")
+        return
+
+    if not os.path.exists(VERRA_CSV):
+        print(f"ERROR: Cannot find {VERRA_CSV}")
+        return
+
+    print("Loading data...")
+    universe_df = pd.read_csv(UNIVERSE_CSV)
+    verra_df = pd.read_csv(VERRA_CSV, low_memory=False)
+
+    vcs_projects = sorted(
+        universe_df[universe_df["standard"] == "VCS"]["project_id"]
+        .astype(str).str.split('.').str[0].str.strip()
+        .unique().tolist()
+    )
+
+    print(f"Running double count check across {len(vcs_projects)} projects...\n")
+
+    all_results = []
+    red_certs = []
+    green_certs = []
+
+    for i, project_id in enumerate(vcs_projects):
+        result = run_double_count_sentinel(
+            project_id, universe_df, verra_df, verbose=False
+        )
+
+        if result is None:
+            print(f"[{i+1}/{len(vcs_projects)}] VCS-{project_id} — No tokens found")
+            continue
+
+        cert = result["certificate"]
+        findings_count = len(result["findings"])
+
+        status = f"[{i+1}/{len(vcs_projects)}] VCS-{project_id} — {cert}"
+        if findings_count:
+            status += f" | {findings_count} finding(s)"
+        print(status)
+
+        all_results.extend(result["results"])
+
+        if cert == "RED":
+            red_certs.append({
+                "id": project_id,
+                "name": result["project_name"],
+                "findings": result["findings"]
+            })
+        else:
+            green_certs.append(project_id)
+
     # Export
-    results_df = pd.DataFrame(results)
-    output_file = f"preretirement_sentinel_VCS{project_id}.csv"
-    results_df.to_csv(output_file, index=False)
+    if all_results:
+        results_df = pd.DataFrame(all_results)
+        results_df.to_csv("double_count_results.csv", index=False)
 
     # Summary
     print(f"\n{'='*75}")
-    print(f"SUMMARY — VCS-{project_id}")
+    print(f"DOUBLE COUNT SENTINEL — COMPLETE")
     print(f"{'='*75}")
-    if findings:
-        print(f"\n🔴 {len(findings)} RED FINDING(S):\n")
-        for vintage, flag_type, amount in findings:
-            print(f"  Vintage {vintage}: {flag_type} — {amount:,.2f} tonnes")
-    else:
-        print(f"\n🟢 GREEN — No over-minting detected across {len(all_vintages)} vintages")
+    print(f"Projects audited: {len(red_certs) + len(green_certs)}")
+    print(f"🔴 RED CERTIFICATES: {len(red_certs)}")
+    print(f"🟢 GREEN CERTIFICATES: {len(green_certs)}")
 
-    print(f"\nResults exported to {output_file}")
+    if red_certs:
+        print(f"\n🔴 RED CERTIFICATE DETAILS:")
+        for r in red_certs:
+            print(f"\n  VCS-{r['id']} — {r['name']}")
+            for vintage, flag_type, amount in r['findings']:
+                print(f"    Vintage {vintage}: {flag_type} — {amount:,.2f} t")
+
+    print(f"\nResults exported to double_count_results.csv")
     print(f"{'='*75}\n")
 
-# --- RUN ---
+# --- MAIN ---
 if __name__ == "__main__":
-    run_preretirement_sentinel("981", VERRA_CSV)
+    if len(sys.argv) > 1:
+        # Single project verbose: python DoubleCount_Sentinel.py 981
+        universe_df = pd.read_csv(UNIVERSE_CSV)
+        verra_df = pd.read_csv(VERRA_CSV, low_memory=False)
+        run_double_count_sentinel(sys.argv[1], universe_df, verra_df, verbose=True)
+    else:
+        # Full audit
+        run_full_audit()
