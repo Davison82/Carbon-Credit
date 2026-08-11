@@ -62,8 +62,9 @@ def run_double_count_sentinel(project_id, universe_df, verra_df, verbose=True):
         print(f"\n{'='*75}")
         print(f"DOUBLE COUNT SENTINEL — VCS-{project_id}")
         print(f"Project: {project_name}")
-        print(f"Method: Cross-chain retirement totals vs Verra issued")
-        print(f"Signal if: Combined retired (all chains) > Verra issued")
+        print("Method: Cross-chain retirement totals vs KNOWN Verra issuance")
+        print("Signal if: Combined retired (all chains) > KNOWN Verra issued")
+        print("Ghost Mint / missing issuance is handled by PreRetirement")
         print(f"{'='*75}")
 
     # Load Verra baseline
@@ -124,15 +125,26 @@ def run_double_count_sentinel(project_id, universe_df, verra_df, verbose=True):
 
         # Signal logic
         signal = ""
-        if verra_issued == 0 and combined > 0:
-            signal = "*** GHOST RETIREMENT — NO VERRA RECORD ***"
-            findings.append((vintage, "Ghost Retirement", combined))
-        elif combined > verra_issued and verra_issued > 0:
+
+        # Only flag over-retirement when there is a KNOWN
+        # Verra issuance figure for this vintage.
+        #
+        # If Verra issuance is zero / unknown, do NOT flag it
+        # as Ghost Retirement. That condition is already handled
+        # by PreRetirement as Ghost Mint.
+
+        if verra_issued > 0 and combined > verra_issued:
             overflow = combined - verra_issued
-            signal = f"*** OVER-RETIRED +{overflow:,.0f} t ***"
-            findings.append((vintage, "Over-Retired", overflow))
-        elif combined > 0:
-            signal = "Within limits"
+            signal = f"*** CROSS-CHAIN OVER-RETIREMENT +{overflow:,.0f} t ***"
+            findings.append(
+                (vintage, "Cross-Chain Over-Retirement", overflow)
+            )
+
+        elif combined > 0 and verra_issued > 0:
+            signal = "Within known Verra issuance"
+
+        elif combined > 0 and verra_issued == 0:
+            signal = "No known Verra issuance — handled by PreRetirement"
 
         if verbose:
             row_str = f"{vintage:<10}"
@@ -160,7 +172,7 @@ def run_double_count_sentinel(project_id, universe_df, verra_df, verbose=True):
             for vintage, flag_type, amount in findings:
                 print(f"  🔴 Vintage {vintage}: {flag_type} — {amount:,.2f} t")
         else:
-            print(f"  🟢 No cross-chain double count signals detected")
+            print(f"  🟢 No cross-chain over-retirement against known issuance detected")
         print(f"{'='*75}\n")
 
     return {
